@@ -3,15 +3,17 @@
 Generate a random pattern image from PNG source files.
 
 Usage:
-  python generate_pattern.py --groups fill krzak kwiat --size 3000x2000 [--spacing 30-80] [--priority lisc] [--scale 0.5] [--output pattern.png]
+  python generate_pattern.py --groups krzak kwiat --fill --size 3000x2000 [--spacing 30-80] [--priority lisc] [--output pattern.png]
 
 Arguments:
-  --groups     : One or more group names (e.g. fill krzak kwiat lisc)
+  --groups     : One or more group names (e.g. krzak kwiat lisc igla grzyb)
+  --fill       : Enable the fill group (placed last, ignores --repeats, uses spacing+density)
   --size       : Output image size as WIDTHxHEIGHT (e.g. 3000x2000)
   --spacing    : Min-max random spacing in pixels between images (default: 30-80)
   --priority   : Group name that should appear more often (2-3x weight)
   --priority-weight : How much more often priority group appears (default: 3)
   --density    : How packed the images are, 1-10 (default: 5). Higher = more attempts to place images
+  --repeats    : Max times a single PNG image can be drawn on the result (default: unlimited, fill ignores this)
   --output     : Output filename (default: pattern_output.png)
   --seed       : Optional random seed for reproducibility (omit for random each run)
 """
@@ -51,21 +53,17 @@ def load_images(file_list):
 def build_weighted_pool(group_images, priority_group, priority_weight):
     """
     Build a weighted list of (group_name, images_list) for random selection.
-    Priority group gets extra weight.
-    Each group contributes a random subset of its images (not all).
-    Returns list of (group_name, subset) tuples with priority groups repeated.
+    Priority group gets extra weight. All images from each group are included.
+    Returns list of (group_name, images_list) tuples with priority groups repeated.
     """
     weighted_groups = []
     for group_name, images in group_images.items():
         if not images:
             continue
-        # Randomly select a subset (at least half, up to all)
-        subset_size = random.randint(max(1, len(images) // 2), len(images))
-        subset = random.sample(images, subset_size)
 
         weight = priority_weight if group_name == priority_group else 1
         for _ in range(weight):
-            weighted_groups.append((group_name, subset))
+            weighted_groups.append((group_name, images))
 
     return weighted_groups
 
@@ -141,6 +139,8 @@ def generate_pattern(
     priority_weight,
     density,
     output_path,
+    max_repeats=None,
+    use_fill=False,
 ):
     """Main generation logic."""
 
@@ -157,33 +157,76 @@ def generate_pattern(
         total_found += len(images)
         print(f"  Group '{group}': {len(images)} images found")
 
-    if total_found == 0:
+    # Load fill group separately if requested
+    fill_images = []
+    if use_fill:
+        fill_files = find_group_files(directory, "fill")
+        if not fill_files:
+            print("Warning: No files found for fill group", file=sys.stderr)
+        else:
+            fill_images = load_images(fill_files)
+            print(f"  Fill group: {len(fill_images)} images found")
+
+    if total_found == 0 and not fill_images:
         print("Error: No images found for any specified group.", file=sys.stderr)
         sys.exit(1)
 
-    # Step 2: Build weighted group list
-    weighted_groups = build_weighted_pool(group_images, priority_group, priority_weight)
-    if not weighted_groups:
-        print("Error: Image pool is empty.", file=sys.stderr)
-        sys.exit(1)
+    # Step 2: Create canvas and occupancy mask
+    canvas = Image.new("RGBA", (output_width, output_height), (255, 255, 255, 0))
+    occupancy = create_occupancy_mask(output_width, output_height)
+    placed_count = 0
+
+    # Step 3: Place main group images (if any groups specified)
+    if group_images:
+        weighted_groups = build_weighted_pool(group_images, priority_group, priority_weight)
+        if not weighted_groups:
+            print("Warning: Main image pool is empty, skipping to fill.", file=sys.stderr)
+        else:
+            placed_count = _place_images(
+                canvas, occupancy, weighted_groups,
+                output_width, output_height,
+                spacing_min, spacing_max, density,
+                max_repeats=max_repeats,
+                label="main",
+            )
+
+    # Step 4: Fill pass — no repeat limit, uses spacing + density
+    if fill_images:
+        fill_pool = [("fill", fill_images)]
+        fill_placed = _place_images(
+            canvas, occupancy, fill_pool,
+            output_width, output_height,
+            spacing_min, spacing_max, density,
+            max_repeats=None,
+            label="fill",
+        )
+        placed_count += fill_placed
+
+    print(f"  Total placed: {placed_count} images on canvas")
+
+    # Step 5: Save output (transparent background)
+    canvas.save(output_path, "PNG")
+    print(f"  Output saved to: {output_path}")
+
+
+def _place_images(
+    canvas, occupancy, weighted_groups,
+    output_width, output_height,
+    spacing_min, spacing_max, density,
+    max_repeats=None,
+    label="main",
+):
+    """Place images from weighted_groups onto canvas/occupancy. Returns count placed."""
 
     # Count total unique images available
     all_images = []
     for _, subset in weighted_groups:
         all_images.extend(subset)
     unique_count = len(set(id(img) for _, img in all_images))
-    print(f"  Pool: {len(weighted_groups)} weighted groups, {unique_count} unique images")
-
-    # Step 3: Create canvas
-    canvas = Image.new("RGBA", (output_width, output_height), (255, 255, 255, 0))
-
-    # Step 4: Place images randomly using pixel-level occupancy mask
-    occupancy = create_occupancy_mask(output_width, output_height)
-    placed_count = 0
+    print(f"  [{label}] Pool: {len(weighted_groups)} weighted groups, {unique_count} unique images")
 
     # Estimate how many images could reasonably fit
     area = output_width * output_height
-    # Count actual non-transparent pixels per image for better estimates
     avg_opaque_pixels = 0
     count = 0
     seen = set()
@@ -198,70 +241,77 @@ def generate_pattern(
                 count += 1
     avg_opaque_pixels = avg_opaque_pixels / max(count, 1)
 
-    # Account for spacing in area estimate
     avg_spacing = (spacing_min + spacing_max) / 2
     avg_side = avg_opaque_pixels ** 0.5
     effective_side = avg_side + avg_spacing
     effective_area = effective_side * effective_side
     estimated_fit = int(area / max(effective_area, 1)) if effective_area > 0 else 50
-    # density 1-10 controls how much of estimated_fit we try to place
-    # density 1 = ~30%, density 5 = ~75%, density 10 = ~120% (overshoot to fill gaps)
     fill_ratio = min(1.5, 0.2 + density * 0.12)
     target_images = max(10, int(estimated_fit * fill_ratio))
-    max_consecutive_failures = 500  # Stop after this many failures in a row
+    max_consecutive_failures = 500
 
-    print(f"  Target: ~{target_images} images (estimated fit: {estimated_fit})...")
+    print(f"  [{label}] Target: ~{target_images} images (estimated fit: {estimated_fit})...")
 
+    placed_count = 0
     consecutive_failures = 0
     attempts = 0
-    max_total_attempts = target_images * 10  # Safety cap
-    recently_used = []  # Track last N images to avoid streaks
-    max_recent = max(3, unique_count // 2)  # Avoid repeating within last N picks
+    max_total_attempts = target_images * 10
+    repeat_counts = {}
+
+    # Build a flat list of all images (with priority weight applied),
+    # shuffle it, and cycle through in order so every image is tried
+    # before any repeats.
+    flat_pool = []
+    for _, images in weighted_groups:
+        for fname, img in images:
+            flat_pool.append((fname, img))
+    # Deduplicate by image id to get unique entries, then apply priority
+    # weighting at the pool level (already handled by weighted_groups)
+    random.shuffle(flat_pool)
+    pool_index = 0
 
     while placed_count < target_images and attempts < max_total_attempts:
         attempts += 1
 
-        # Pick a random weighted group, then a random image from it
-        # Avoid picking the same image as recently used
-        for _pick_try in range(10):
-            _, subset = random.choice(weighted_groups)
-            filename, img = random.choice(subset)
-            if id(img) not in recently_used or _pick_try == 9:
-                break
+        # Cycle through shuffled pool; reshuffle when we wrap around
+        filename, img = flat_pool[pool_index]
+        pool_index += 1
+        if pool_index >= len(flat_pool):
+            pool_index = 0
+            random.shuffle(flat_pool)
 
-        # Use image at original size (no scaling, no rotation)
-        rw, rh = img.size
+        # Skip if this image has reached its repeat limit
+        if max_repeats is not None and repeat_counts.get(id(img), 0) >= max_repeats:
+            all_maxed = all(
+                repeat_counts.get(id(im), 0) >= max_repeats
+                for _, im in flat_pool
+            )
+            if all_maxed:
+                print(f"  [{label}] Stopping: all images reached max repeats ({max_repeats})")
+                break
+            continue
 
         # Try to place using pixel-level collision
         pos = try_place_image(output_width, output_height, img, occupancy)
         if pos is None:
             consecutive_failures += 1
             if consecutive_failures >= max_consecutive_failures:
-                print(f"  Stopping: {max_consecutive_failures} consecutive placement failures (canvas full)")
+                print(f"  [{label}] Stopping: {max_consecutive_failures} consecutive failures (canvas full)")
                 break
             continue
 
         consecutive_failures = 0
         x, y = pos
 
-        # Mark occupied pixels with spacing buffer
         spacing = random.randint(spacing_min, spacing_max)
         mark_occupied(occupancy, x, y, img, spacing)
-
-        # Paste with alpha compositing
         canvas.paste(img, (x, y), img)
         placed_count += 1
 
-        # Track recently used to ensure variety
-        recently_used.append(id(img))
-        if len(recently_used) > max_recent:
-            recently_used.pop(0)
+        repeat_counts[id(img)] = repeat_counts.get(id(img), 0) + 1
 
-    print(f"  Placed {placed_count} images on canvas")
-
-    # Step 5: Save output (transparent background)
-    canvas.save(output_path, "PNG")
-    print(f"  Output saved to: {output_path}")
+    print(f"  [{label}] Placed {placed_count} images")
+    return placed_count
 
 
 def parse_size(size_str):
@@ -298,14 +348,18 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --groups fill krzak kwiat --size 3000x2000
-  %(prog)s --groups fill krzak kwiat lisc --size 4000x3000 --priority lisc --spacing 20-60
+  %(prog)s --groups krzak kwiat --fill --size 3000x2000
+  %(prog)s --groups krzak kwiat lisc --fill --size 4000x3000 --priority lisc --spacing 20-60
   %(prog)s --groups igla grzyb --size 2000x1500 --density 7
         """,
     )
     parser.add_argument(
-        "--groups", nargs="+", required=True,
-        help="Group names to include (e.g. fill krzak kwiat)"
+        "--groups", nargs="+", default=[],
+        help="Group names to include (e.g. krzak kwiat lisc igla grzyb)"
+    )
+    parser.add_argument(
+        "--fill", action="store_true", default=False,
+        help="Enable fill group (placed last, ignores --repeats, uses spacing+density)"
     )
     parser.add_argument(
         "--size", required=True,
@@ -332,6 +386,10 @@ Examples:
         help="Output filename (default: pattern_output.png)"
     )
     parser.add_argument(
+        "--repeats", type=int, default=None,
+        help="Max times a single PNG image can be drawn on the result (default: unlimited)"
+    )
+    parser.add_argument(
         "--seed", type=int, default=None,
         help="Random seed (omit for different result each run)"
     )
@@ -351,6 +409,16 @@ Examples:
     # Validate
     if args.density < 1 or args.density > 20:
         print("Warning: density outside recommended range 1-10", file=sys.stderr)
+
+    if not args.groups and not args.fill:
+        parser.error("At least one of --groups or --fill is required")
+
+    # Remove 'fill' from groups if accidentally included — use --fill instead
+    if "fill" in args.groups:
+        print("Warning: 'fill' removed from --groups. Use --fill flag for the fill group.", file=sys.stderr)
+        args.groups = [g for g in args.groups if g != "fill"]
+        args.fill = True
+
     if args.priority and args.priority not in args.groups:
         print(f"Warning: priority group '{args.priority}' not in --groups list, adding it", file=sys.stderr)
         args.groups.append(args.priority)
@@ -359,11 +427,15 @@ Examples:
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
     print(f"Generating pattern: {output_width}x{output_height}")
-    print(f"  Groups: {', '.join(args.groups)}")
+    if args.groups:
+        print(f"  Groups: {', '.join(args.groups)}")
+    print(f"  Fill: {'yes' if args.fill else 'no'}")
     print(f"  Spacing: {spacing_min}-{spacing_max}px")
     print(f"  Density: {args.density}")
     if args.priority:
         print(f"  Priority: '{args.priority}' (weight: {args.priority_weight}x)")
+    if args.repeats:
+        print(f"  Max repeats per image: {args.repeats} (fill ignores this)")
 
     generate_pattern(
         directory=script_dir,
@@ -376,6 +448,8 @@ Examples:
         priority_weight=args.priority_weight,
         density=args.density,
         output_path=os.path.join(script_dir, args.output),
+        max_repeats=args.repeats,
+        use_fill=args.fill,
     )
 
 

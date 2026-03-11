@@ -4,18 +4,20 @@
 #
 # Usage:
 #   ./pattern.sh --all --size 3000x2000
-#   ./pattern.sh --groups fill krzak kwiat --size 3000x2000
-#   ./pattern.sh --groups fill krzak kwiat lisc --size 4000x3000 --priority lisc
+#   ./pattern.sh --groups krzak kwiat --fill --size 3000x2000
+#   ./pattern.sh --groups krzak kwiat lisc --fill --size 4000x3000 --priority lisc
 #   ./pattern.sh --groups igla grzyb --size 2000x1500 --density 7 --spacing 20-60
 #
 # Parameters:
-#   --all             Use all group directories found in the script directory
-#   --groups          Group names to include (required unless --all), e.g. fill krzak kwiat lisc igla grzyb
+#   --all             Use all group directories (adds --fill + all others as --groups)
+#   --groups          Group names to include (e.g. krzak kwiat lisc igla grzyb)
+#   --fill            Enable fill group (placed last, ignores --repeats, uses spacing+density)
 #   --size            Output size as WIDTHxHEIGHT (required), e.g. 3000x2000
 #   --priority        Group that should appear more often, e.g. lisc
 #   --priority-weight How many times more the priority appears (default: 3)
 #   --spacing         Min-max pixel spacing between images (default: 30-80)
 #   --density         How packed, 1-10 (default: 5). Higher = more images
+#   --repeats         Max times a single PNG can appear on the result (default: unlimited, fill ignores this)
 #   --output          Output filename (default: pattern_output.png)
 #   --seed            Fix random seed for reproducibility (omit for random)
 #
@@ -28,15 +30,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE_NAME="pattern-generator"
 
-# Expand --all flag into --groups with all discovered subdirectories
+# Expand --all flag into --groups (excluding fill) + --fill
 ARGS=()
 for arg in "$@"; do
     if [[ "$arg" == "--all" ]]; then
+        ARGS+=("--fill")
         ARGS+=("--groups")
         for dir in "${SCRIPT_DIR}"/*/; do
             group="$(basename "$dir")"
-            # Skip hidden directories
+            # Skip hidden directories and the fill group (handled by --fill)
             [[ "$group" == .* ]] && continue
+            [[ "$group" == "fill" ]] && continue
             ARGS+=("$group")
         done
     else
