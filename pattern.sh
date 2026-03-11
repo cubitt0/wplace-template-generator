@@ -3,12 +3,14 @@
 # pattern.sh - Generate random pattern images from PNG source files using Docker
 #
 # Usage:
+#   ./pattern.sh --preset las-igla --size 3000x2000
 #   ./pattern.sh --all --size 3000x2000
 #   ./pattern.sh --groups krzak kwiat --fill --size 3000x2000
 #   ./pattern.sh --groups krzak kwiat lisc --fill --size 4000x3000 --priority lisc
 #   ./pattern.sh --groups igla grzyb --size 2000x1500 --density 7 --spacing 20-60
 #
 # Parameters:
+#   --preset          Load a preset from presets/<name>.json (e.g. las-igla, las-lisc, laka)
 #   --all             Use all group directories (adds --fill + all others as --groups)
 #   --groups          Group names to include (e.g. krzak kwiat lisc igla grzyb)
 #   --fill            Enable fill group (placed last, ignores --repeats, uses spacing+density)
@@ -38,9 +40,10 @@ for arg in "$@"; do
         ARGS+=("--groups")
         for dir in "${SCRIPT_DIR}"/*/; do
             group="$(basename "$dir")"
-            # Skip hidden directories and the fill group (handled by --fill)
+            # Skip hidden directories, the fill group, and presets directory
             [[ "$group" == .* ]] && continue
             [[ "$group" == "fill" ]] && continue
+            [[ "$group" == "presets" ]] && continue
             ARGS+=("$group")
         done
     else

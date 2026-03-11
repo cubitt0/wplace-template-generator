@@ -1,0 +1,7 @@
+{
+  "groups": ["kwiat", "krzak"],
+  "fill": true,
+  "priority": "kwiat",
+  "density": 10,
+  "spacing": "1-2"
+}

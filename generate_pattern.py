@@ -8,6 +8,7 @@ Usage:
 Arguments:
   --groups     : One or more group names (e.g. krzak kwiat lisc igla grzyb)
   --fill       : Enable the fill group (placed last, ignores --repeats, uses spacing+density)
+  --preset     : Load a preset from presets/<name>.json (sets groups, fill, priority, density, spacing)
   --size       : Output image size as WIDTHxHEIGHT (e.g. 3000x2000)
   --spacing    : Min-max random spacing in pixels between images (default: 30-80)
   --priority   : Group name that should appear more often (2-3x weight)
@@ -20,6 +21,7 @@ Arguments:
 
 import argparse
 import glob
+import json
 import os
 import random
 import sys
@@ -348,6 +350,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  %(prog)s --preset las-igla --size 3000x2000
+  %(prog)s --preset laka --size 4000x3000 --repeats 5
   %(prog)s --groups krzak kwiat --fill --size 3000x2000
   %(prog)s --groups krzak kwiat lisc --fill --size 4000x3000 --priority lisc --spacing 20-60
   %(prog)s --groups igla grzyb --size 2000x1500 --density 7
@@ -360,6 +364,10 @@ Examples:
     parser.add_argument(
         "--fill", action="store_true", default=False,
         help="Enable fill group (placed last, ignores --repeats, uses spacing+density)"
+    )
+    parser.add_argument(
+        "--preset", default=None,
+        help="Load a preset from presets/<name>.json (sets groups, fill, priority, density, spacing)"
     )
     parser.add_argument(
         "--size", required=True,
@@ -396,6 +404,36 @@ Examples:
 
     args = parser.parse_args()
 
+    # Determine working directory (where the source PNGs are)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Load preset if specified (preset values act as defaults, CLI args override)
+    if args.preset:
+        preset_path = os.path.join(script_dir, "presets", f"{args.preset}.json")
+        if not os.path.isfile(preset_path):
+            available = [f.replace(".json", "") for f in os.listdir(os.path.join(script_dir, "presets")) if f.endswith(".json")]
+            parser.error(f"Preset '{args.preset}' not found. Available: {', '.join(sorted(available))}")
+        with open(preset_path) as f:
+            preset = json.load(f)
+        print(f"  Loading preset: {args.preset}")
+        # Apply preset values as defaults (CLI args take precedence)
+        if not args.groups and "groups" in preset:
+            args.groups = preset["groups"]
+        if not args.fill and preset.get("fill", False):
+            args.fill = True
+        # For these, check if the user explicitly provided them on CLI
+        # by comparing against parser defaults
+        if args.priority is None and "priority" in preset:
+            args.priority = preset["priority"]
+        if args.density == 5 and "density" in preset:  # 5 is the argparse default
+            args.density = preset["density"]
+        if args.spacing == "30-80" and "spacing" in preset:  # "30-80" is the argparse default
+            args.spacing = preset["spacing"]
+        if args.priority_weight == 3 and "priority_weight" in preset:  # 3 is the argparse default
+            args.priority_weight = preset["priority_weight"]
+        if args.output == "pattern_output.png":  # default not overridden by user
+            args.output = f"{args.preset}.png"
+
     # Parse complex args
     output_width, output_height = parse_size(args.size)
     spacing_min, spacing_max = parse_spacing(args.spacing)
@@ -411,7 +449,7 @@ Examples:
         print("Warning: density outside recommended range 1-10", file=sys.stderr)
 
     if not args.groups and not args.fill:
-        parser.error("At least one of --groups or --fill is required")
+        parser.error("At least one of --groups, --fill, or --preset is required")
 
     # Remove 'fill' from groups if accidentally included — use --fill instead
     if "fill" in args.groups:
@@ -422,9 +460,6 @@ Examples:
     if args.priority and args.priority not in args.groups:
         print(f"Warning: priority group '{args.priority}' not in --groups list, adding it", file=sys.stderr)
         args.groups.append(args.priority)
-
-    # Determine working directory (where the source PNGs are)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
 
     print(f"Generating pattern: {output_width}x{output_height}")
     if args.groups:
