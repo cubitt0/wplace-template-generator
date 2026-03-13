@@ -27,7 +27,9 @@ import random
 import sys
 import time
 
+import numpy as np
 from PIL import Image
+from scipy.ndimage import binary_dilation
 
 
 def find_group_files(directory, group_name):
@@ -72,45 +74,59 @@ def build_weighted_pool(group_images, priority_group, priority_weight):
 
 def create_occupancy_mask(width, height):
     """Create a boolean occupancy grid for pixel-level collision."""
-    return [[False] * width for _ in range(height)]
+    return np.zeros((height, width), dtype=bool)
+
+
+def _get_alpha_mask(img):
+    """Extract alpha channel as a boolean NumPy array (True where opaque)."""
+    alpha = np.array(img.split()[-1])
+    return alpha > 0
 
 
 def mark_occupied(mask, x, y, img, spacing):
     """Mark pixels as occupied for a placed image, including spacing buffer."""
     w, h = img.size
-    mask_h = len(mask)
-    mask_w = len(mask[0])
+    mask_h, mask_w = mask.shape
 
-    for iy in range(h):
-        for ix in range(w):
-            _, _, _, a = img.getpixel((ix, iy))
-            if a > 0:
-                # Mark this pixel and spacing buffer around it
-                for dy in range(-spacing, spacing + 1):
-                    for dx in range(-spacing, spacing + 1):
-                        my = y + iy + dy
-                        mx = x + ix + dx
-                        if 0 <= my < mask_h and 0 <= mx < mask_w:
-                            mask[my][mx] = True
+    alpha_mask = _get_alpha_mask(img)
+
+    # Create a structuring element for dilation (spacing buffer)
+    if spacing > 0:
+        dilation_size = 2 * spacing + 1
+        struct = np.ones((dilation_size, dilation_size), dtype=bool)
+        expanded = binary_dilation(alpha_mask, structure=struct)
+    else:
+        expanded = alpha_mask
+
+    # Compute the region on the occupancy mask that this expanded image covers
+    eh, ew = expanded.shape
+    src_y0 = max(0, -y + spacing if spacing > 0 else 0)
+    src_x0 = max(0, -x + spacing if spacing > 0 else 0)
+    dst_y0 = max(0, y - spacing if spacing > 0 else y)
+    dst_x0 = max(0, x - spacing if spacing > 0 else x)
+    dst_y1 = min(mask_h, dst_y0 + eh - src_y0)
+    dst_x1 = min(mask_w, dst_x0 + ew - src_x0)
+    copy_h = dst_y1 - dst_y0
+    copy_w = dst_x1 - dst_x0
+
+    if copy_h > 0 and copy_w > 0:
+        mask[dst_y0:dst_y1, dst_x0:dst_x1] |= expanded[src_y0:src_y0 + copy_h, src_x0:src_x0 + copy_w]
 
 
 def can_place_image(mask, x, y, img):
     """Check if image can be placed without overlapping occupied pixels."""
     w, h = img.size
-    mask_h = len(mask)
-    mask_w = len(mask[0])
+    mask_h, mask_w = mask.shape
 
-    for iy in range(h):
-        for ix in range(w):
-            _, _, _, a = img.getpixel((ix, iy))
-            if a > 0:
-                my = y + iy
-                mx = x + ix
-                if my < 0 or my >= mask_h or mx < 0 or mx >= mask_w:
-                    return False
-                if mask[my][mx]:
-                    return False
-    return True
+    # Bounds check
+    if x < 0 or y < 0 or x + w > mask_w or y + h > mask_h:
+        return False
+
+    alpha_mask = _get_alpha_mask(img)
+
+    # Check overlap: any pixel that is both opaque and already occupied
+    region = mask[y:y + h, x:x + w]
+    return not np.any(region & alpha_mask)
 
 
 def try_place_image(canvas_w, canvas_h, img, mask):
@@ -145,6 +161,7 @@ def generate_pattern(
     use_fill=False,
 ):
     """Main generation logic."""
+    t_start = time.time()
 
     # Step 1: Find and load images for each group
     group_images = {}
@@ -208,7 +225,9 @@ def generate_pattern(
 
     # Step 5: Save output (transparent background)
     canvas.save(output_path, "PNG")
+    elapsed = time.time() - t_start
     print(f"  Output saved to: {output_path}")
+    print(f"  Completed in {elapsed:.1f}s")
 
 
 def _place_images(
@@ -237,8 +256,7 @@ def _place_images(
             img_id = id(img)
             if img_id not in seen:
                 seen.add(img_id)
-                w, h = img.size
-                opaque = sum(1 for iy in range(h) for ix in range(w) if img.getpixel((ix, iy))[3] > 0)
+                opaque = int(np.count_nonzero(_get_alpha_mask(img)))
                 avg_opaque_pixels += opaque
                 count += 1
     avg_opaque_pixels = avg_opaque_pixels / max(count, 1)
@@ -274,6 +292,13 @@ def _place_images(
 
     while placed_count < target_images and attempts < max_total_attempts:
         attempts += 1
+
+        # Progress bar
+        pct = placed_count / target_images
+        bar_len = 40
+        filled = int(bar_len * pct)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        print(f"\r  [{label}] {bar} {pct:5.1%}  ({placed_count}/{target_images})", end="", flush=True)
 
         # Cycle through shuffled pool; reshuffle when we wrap around
         filename, img = flat_pool[pool_index]
@@ -312,6 +337,11 @@ def _place_images(
 
         repeat_counts[id(img)] = repeat_counts.get(id(img), 0) + 1
 
+    # Final progress bar at 100% (or actual end state)
+    pct = placed_count / target_images if target_images > 0 else 1.0
+    filled = int(40 * min(pct, 1.0))
+    bar = "█" * filled + "░" * (40 - filled)
+    print(f"\r  [{label}] {bar} {pct:5.1%}  ({placed_count}/{target_images})")
     print(f"  [{label}] Placed {placed_count} images")
     return placed_count
 
