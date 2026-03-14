@@ -77,10 +77,13 @@ def create_occupancy_mask(width, height):
     return np.zeros((height, width), dtype=bool)
 
 
-def _get_alpha_mask(img):
-    """Extract alpha channel as a boolean NumPy array (True where opaque)."""
-    alpha = np.array(img.split()[-1])
-    return alpha > 0
+def _get_alpha_mask(img, _cache={}):
+    """Extract alpha channel as a boolean NumPy array (True where opaque). Cached per image."""
+    img_id = id(img)
+    if img_id not in _cache:
+        alpha = np.array(img.split()[-1])
+        _cache[img_id] = alpha > 0
+    return _cache[img_id]
 
 
 def mark_occupied(mask, x, y, img, spacing):
@@ -90,22 +93,27 @@ def mark_occupied(mask, x, y, img, spacing):
 
     alpha_mask = _get_alpha_mask(img)
 
-    # Create a structuring element for dilation (spacing buffer)
     if spacing > 0:
+        # Pad the alpha mask so dilation can expand beyond the image bounds
+        padded = np.pad(alpha_mask, spacing, mode='constant', constant_values=False)
         dilation_size = 2 * spacing + 1
         struct = np.ones((dilation_size, dilation_size), dtype=bool)
-        expanded = binary_dilation(alpha_mask, structure=struct)
+        expanded = binary_dilation(padded, structure=struct)
     else:
         expanded = alpha_mask
 
-    # Compute the region on the occupancy mask that this expanded image covers
-    eh, ew = expanded.shape
-    src_y0 = max(0, -y + spacing if spacing > 0 else 0)
-    src_x0 = max(0, -x + spacing if spacing > 0 else 0)
-    dst_y0 = max(0, y - spacing if spacing > 0 else y)
-    dst_x0 = max(0, x - spacing if spacing > 0 else x)
-    dst_y1 = min(mask_h, dst_y0 + eh - src_y0)
-    dst_x1 = min(mask_w, dst_x0 + ew - src_x0)
+    # The expanded mask's top-left corresponds to (x - spacing, y - spacing) on canvas
+    exp_h, exp_w = expanded.shape
+    origin_y = y - spacing if spacing > 0 else y
+    origin_x = x - spacing if spacing > 0 else x
+
+    # Clip to canvas bounds
+    src_y0 = max(0, -origin_y)
+    src_x0 = max(0, -origin_x)
+    dst_y0 = max(0, origin_y)
+    dst_x0 = max(0, origin_x)
+    dst_y1 = min(mask_h, origin_y + exp_h)
+    dst_x1 = min(mask_w, origin_x + exp_w)
     copy_h = dst_y1 - dst_y0
     copy_w = dst_x1 - dst_x0
 
@@ -129,19 +137,77 @@ def can_place_image(mask, x, y, img):
     return not np.any(region & alpha_mask)
 
 
-def try_place_image(canvas_w, canvas_h, img, mask):
+CELL_SIZE = 32  # coarse grid cell size in pixels
+
+
+def _build_coarse_grid(mask):
+    """Build a coarse grid indicating which cells have ANY free space."""
+    h, w = mask.shape
+    rows = (h + CELL_SIZE - 1) // CELL_SIZE
+    cols = (w + CELL_SIZE - 1) // CELL_SIZE
+    grid = np.ones((rows, cols), dtype=bool)  # True = has free space
+    for r in range(rows):
+        for c in range(cols):
+            block = mask[r * CELL_SIZE:(r + 1) * CELL_SIZE, c * CELL_SIZE:(c + 1) * CELL_SIZE]
+            if block.all():  # fully occupied
+                grid[r, c] = False
+    return grid
+
+
+def _update_coarse_grid(grid, mask, x, y, w, h, spacing):
+    """Update coarse grid cells affected by a newly placed image."""
+    r0 = max(0, (y - spacing) // CELL_SIZE)
+    c0 = max(0, (x - spacing) // CELL_SIZE)
+    r1 = min(grid.shape[0], (y + h + spacing) // CELL_SIZE + 1)
+    c1 = min(grid.shape[1], (x + w + spacing) // CELL_SIZE + 1)
+    mask_h, mask_w = mask.shape
+    for r in range(r0, r1):
+        for c in range(c0, c1):
+            block = mask[r * CELL_SIZE:min((r + 1) * CELL_SIZE, mask_h),
+                         c * CELL_SIZE:min((c + 1) * CELL_SIZE, mask_w)]
+            if block.all():
+                grid[r, c] = False
+
+
+def try_place_image(canvas_w, canvas_h, img, mask, coarse_grid):
     """
     Try to find a random position where the image's non-transparent pixels
-    don't overlap with already-occupied pixels. Returns (x, y) or None.
+    don't overlap with already-occupied pixels.
+    Uses coarse grid to focus searches on free areas.
+    Returns (x, y) or None.
     """
     img_w, img_h = img.size
-    max_attempts = 1000
-    for _ in range(max_attempts):
-        x = random.randint(0, max(0, canvas_w - img_w))
-        y = random.randint(0, max(0, canvas_h - img_h))
+    max_x = max(0, canvas_w - img_w)
+    max_y = max(0, canvas_h - img_h)
+    if max_x == 0 and max_y == 0:
+        if can_place_image(mask, 0, 0, img):
+            return (0, 0)
+        return None
 
-        if can_place_image(mask, x, y, img):
-            return (x, y)
+    # Find coarse-grid cells that have free space and could fit the image
+    free_cells = np.argwhere(coarse_grid)
+    if len(free_cells) == 0:
+        return None
+
+    # Batch: generate many candidate positions at once in free cells
+    batch_size = 64
+    max_rounds = 16  # 64 * 16 = 1024 total attempts max
+
+    for _ in range(max_rounds):
+        # Pick random free cells
+        cell_indices = np.random.randint(0, len(free_cells), size=batch_size)
+        cells = free_cells[cell_indices]
+
+        # Generate random offsets within each cell
+        offsets_y = np.random.randint(0, CELL_SIZE, size=batch_size)
+        offsets_x = np.random.randint(0, CELL_SIZE, size=batch_size)
+
+        xs = np.clip(cells[:, 1] * CELL_SIZE + offsets_x, 0, max_x).astype(int)
+        ys = np.clip(cells[:, 0] * CELL_SIZE + offsets_y, 0, max_y).astype(int)
+
+        for i in range(batch_size):
+            if can_place_image(mask, int(xs[i]), int(ys[i]), img):
+                return (int(xs[i]), int(ys[i]))
 
     return None
 
@@ -278,16 +344,80 @@ def _place_images(
     max_total_attempts = target_images * 10
     repeat_counts = {}
 
-    # Build a flat list of all images (with priority weight applied),
-    # shuffle it, and cycle through in order so every image is tried
-    # before any repeats.
+    # Build coarse grid for fast free-space lookup
+    coarse_grid = _build_coarse_grid(occupancy)
+
+    # Compute opaque pixel count for sorting (cached via _get_alpha_mask)
+    def _sort_key(item):
+        _, img = item
+        return int(np.count_nonzero(_get_alpha_mask(img)))
+
+    # --- Phase 1: Place every unique image at least once (largest first) ---
+    # This guarantees all groups get representation before priority weighting kicks in.
+    unique_pool = {}
+    for _, images in weighted_groups:
+        for fname, img in images:
+            if id(img) not in unique_pool:
+                unique_pool[id(img)] = (fname, img)
+    unique_list = sorted(unique_pool.values(), key=_sort_key, reverse=True)
+    print(f"  [{label}] Phase 1: placing {len(unique_list)} unique images (largest first)...")
+
+    for fname, img in unique_list:
+        if placed_count >= target_images or attempts >= max_total_attempts:
+            break
+        attempts += 1
+
+        # Progress bar
+        pct = placed_count / target_images
+        bar_len = 40
+        filled = int(bar_len * pct)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        print(f"\r  [{label}] {bar} {pct:5.1%}  ({placed_count}/{target_images})", end="", flush=True)
+
+        pos = try_place_image(output_width, output_height, img, occupancy, coarse_grid)
+        if pos is not None:
+            x, y = pos
+            spacing = random.randint(spacing_min, spacing_max)
+            mark_occupied(occupancy, x, y, img, spacing)
+            _update_coarse_grid(coarse_grid, occupancy, x, y, img.size[0], img.size[1], spacing)
+            canvas.paste(img, (x, y), img)
+            placed_count += 1
+            repeat_counts[id(img)] = repeat_counts.get(id(img), 0) + 1
+
+    # --- Phase 2: Fill remaining capacity with priority-weighted pool (largest first) ---
+    # Build the full weighted pool, sorted by size with randomized tiers
     flat_pool = []
     for _, images in weighted_groups:
         for fname, img in images:
             flat_pool.append((fname, img))
-    # Deduplicate by image id to get unique entries, then apply priority
-    # weighting at the pool level (already handled by weighted_groups)
-    random.shuffle(flat_pool)
+
+    flat_pool.sort(key=_sort_key, reverse=True)
+
+    # Group by size tiers so images of similar size are shuffled randomly,
+    # while the overall order stays largest-first
+    def _build_tiered_pool(pool):
+        sizes = [_sort_key(item) for item in pool]
+        if not sizes:
+            return pool
+        max_s = max(sizes)
+        tier_s = max(1, max_s // 10)
+        result = []
+        cur_tier = []
+        cur_tid = sizes[0] // tier_s
+        for i, item in enumerate(pool):
+            tid = sizes[i] // tier_s
+            if tid != cur_tid:
+                random.shuffle(cur_tier)
+                result.extend(cur_tier)
+                cur_tier = [item]
+                cur_tid = tid
+            else:
+                cur_tier.append(item)
+        random.shuffle(cur_tier)
+        result.extend(cur_tier)
+        return result
+
+    flat_pool = _build_tiered_pool(flat_pool)
     pool_index = 0
 
     while placed_count < target_images and attempts < max_total_attempts:
@@ -300,12 +430,12 @@ def _place_images(
         bar = "█" * filled + "░" * (bar_len - filled)
         print(f"\r  [{label}] {bar} {pct:5.1%}  ({placed_count}/{target_images})", end="", flush=True)
 
-        # Cycle through shuffled pool; reshuffle when we wrap around
+        # Cycle through size-sorted pool; re-tier on wrap
         filename, img = flat_pool[pool_index]
         pool_index += 1
         if pool_index >= len(flat_pool):
             pool_index = 0
-            random.shuffle(flat_pool)
+            flat_pool = _build_tiered_pool(flat_pool)
 
         # Skip if this image has reached its repeat limit
         if max_repeats is not None and repeat_counts.get(id(img), 0) >= max_repeats:
@@ -318,12 +448,12 @@ def _place_images(
                 break
             continue
 
-        # Try to place using pixel-level collision
-        pos = try_place_image(output_width, output_height, img, occupancy)
+        # Try to place using pixel-level collision with coarse grid acceleration
+        pos = try_place_image(output_width, output_height, img, occupancy, coarse_grid)
         if pos is None:
             consecutive_failures += 1
             if consecutive_failures >= max_consecutive_failures:
-                print(f"  [{label}] Stopping: {max_consecutive_failures} consecutive failures (canvas full)")
+                print(f"\n  [{label}] Stopping: {max_consecutive_failures} consecutive failures (canvas full)")
                 break
             continue
 
@@ -332,6 +462,7 @@ def _place_images(
 
         spacing = random.randint(spacing_min, spacing_max)
         mark_occupied(occupancy, x, y, img, spacing)
+        _update_coarse_grid(coarse_grid, occupancy, x, y, img.size[0], img.size[1], spacing)
         canvas.paste(img, (x, y), img)
         placed_count += 1
 

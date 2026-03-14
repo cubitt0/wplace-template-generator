@@ -1,8 +1,8 @@
 {
-  "groups": ["igla", "grzyb", "krzak"],
+  "groups": ["igla","krzak", "grzyb"],
   "fill": true,
   "priority": "igla",
-  "priority_weight": 20,
+  "priority_weight": 10,
   "density": 10,
   "spacing": "1-2"
 }
