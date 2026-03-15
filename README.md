@@ -17,10 +17,11 @@ Source images live in folders by type. Mix and match them to create your pattern
 | 🌲 `conifer` | 6 | Conifer needles / branches |
 | 🌳 `bush` | 4 | Bush elements |
 | 🌸 `flower` | 52 | Flowers (many color variants) |
-| 🍂 `leaf` | 10 | Leafy trees (deciduous) |
+| 🍂 `leaf` | 12 | Leafy trees (deciduous) |
 | 🍄 `shroom` | 1 | Mushroom |
-| 🐾 `animals` | 2 | Animals |
-| 🟩 `fill` | 4 | Background fill elements (special — see below) |
+| 🐾 `animals` | 11 | Animals |
+| 🏠 `buildings` | 1 | Buildings & structures |
+| 🟩 `fill` | 5 | Background fill elements (special — see below) |
 
 > **Fill group** is a special layer placed **last**, ignores `--repeats`, and uses spacing + density just like other groups. Enable it with the `--fill` flag.
 
