@@ -1,0 +1,9 @@
+{
+  "groups": ["leaf", "bush","flower"],
+  "fill": true,
+  "flip": true,
+  "priority": "leaf",
+  "priority_weight": 10,
+  "density": 10,
+  "spacing": "0-2"
+}

@@ -1,8 +1,0 @@
-{
-  "groups": ["lisc", "krzak","kwiat"],
-  "fill": true,
-  "priority": "lisc",
-  "priority_weight": 10,
-  "density": 10,
-  "spacing": "1-2"
-}

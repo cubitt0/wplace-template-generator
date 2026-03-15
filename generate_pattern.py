@@ -3,10 +3,10 @@
 Generate a random pattern image from PNG source files.
 
 Usage:
-  python generate_pattern.py --groups krzak kwiat --fill --size 3000x2000 [--spacing 30-80] [--priority lisc] [--output pattern.png]
+  python generate_pattern.py --groups bush flower --fill --size 3000x2000 [--spacing 30-80] [--priority leaf] [--output pattern.png]
 
 Arguments:
-  --groups     : One or more group names (e.g. krzak kwiat lisc igla grzyb)
+  --groups     : One or more group names (e.g. bush flower leaf conifer shroom)
   --fill       : Enable the fill group (placed last, ignores --repeats, uses spacing+density)
   --preset     : Load a preset from presets/<name>.json (sets groups, fill, priority, density, spacing)
   --size       : Output image size as WIDTHxHEIGHT (e.g. 3000x2000)
@@ -15,6 +15,7 @@ Arguments:
   --priority-weight : How much more often priority group appears (default: 3)
   --density    : How packed the images are, 1-10 (default: 5). Higher = more attempts to place images
   --repeats    : Max times a single PNG image can be drawn on the result (default: unlimited, fill ignores this)
+  --flip       : Each placed image has a 50% chance of being flipped horizontally
   --output     : Output filename (default: pattern_output.png)
   --seed       : Optional random seed for reproducibility (omit for random each run)
 """
@@ -225,6 +226,7 @@ def generate_pattern(
     output_path,
     max_repeats=None,
     use_fill=False,
+    flip=False,
 ):
     """Main generation logic."""
     t_start = time.time()
@@ -273,6 +275,7 @@ def generate_pattern(
                 spacing_min, spacing_max, density,
                 max_repeats=max_repeats,
                 label="main",
+                flip=flip,
             )
 
     # Step 4: Fill pass — no repeat limit, uses spacing + density
@@ -284,6 +287,7 @@ def generate_pattern(
             spacing_min, spacing_max, density,
             max_repeats=None,
             label="fill",
+            flip=flip,
         )
         placed_count += fill_placed
 
@@ -302,6 +306,7 @@ def _place_images(
     spacing_min, spacing_max, density,
     max_repeats=None,
     label="main",
+    flip=False,
 ):
     """Place images from weighted_groups onto canvas/occupancy. Returns count placed."""
 
@@ -374,6 +379,10 @@ def _place_images(
         bar = "█" * filled + "░" * (bar_len - filled)
         print(f"\r  [{label}] {bar} {pct:5.1%}  ({placed_count}/{target_images})", end="", flush=True)
 
+        # Randomly flip horizontally with 50% chance
+        if flip and random.random() < 0.5:
+            img = img.transpose(Image.FLIP_LEFT_RIGHT)
+
         pos = try_place_image(output_width, output_height, img, occupancy, coarse_grid)
         if pos is not None:
             x, y = pos
@@ -436,6 +445,10 @@ def _place_images(
         if pool_index >= len(flat_pool):
             pool_index = 0
             flat_pool = _build_tiered_pool(flat_pool)
+
+        # Randomly flip horizontally with 50% chance
+        if flip and random.random() < 0.5:
+            img = img.transpose(Image.FLIP_LEFT_RIGHT)
 
         # Skip if this image has reached its repeat limit
         if max_repeats is not None and repeat_counts.get(id(img), 0) >= max_repeats:
@@ -511,16 +524,16 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --preset las-igla --size 3000x2000
-  %(prog)s --preset laka --size 4000x3000 --repeats 5
-  %(prog)s --groups krzak kwiat --fill --size 3000x2000
-  %(prog)s --groups krzak kwiat lisc --fill --size 4000x3000 --priority lisc --spacing 20-60
-  %(prog)s --groups igla grzyb --size 2000x1500 --density 7
+  %(prog)s --preset forest-conifer --size 3000x2000
+  %(prog)s --preset meadow --size 4000x3000 --repeats 5
+  %(prog)s --groups bush flower --fill --size 3000x2000
+  %(prog)s --groups bush flower leaf --fill --size 4000x3000 --priority leaf --spacing 20-60
+  %(prog)s --groups conifer shroom --size 2000x1500 --density 7
         """,
     )
     parser.add_argument(
         "--groups", nargs="+", default=[],
-        help="Group names to include (e.g. krzak kwiat lisc igla grzyb)"
+        help="Group names to include (e.g. bush flower leaf conifer shroom)"
     )
     parser.add_argument(
         "--fill", action="store_true", default=False,
@@ -559,6 +572,10 @@ Examples:
         help="Max times a single PNG image can be drawn on the result (default: unlimited)"
     )
     parser.add_argument(
+        "--flip", action="store_true", default=False,
+        help="Each placed image has a 50%% chance of being flipped horizontally"
+    )
+    parser.add_argument(
         "--seed", type=int, default=None,
         help="Random seed (omit for different result each run)"
     )
@@ -592,6 +609,8 @@ Examples:
             args.spacing = preset["spacing"]
         if args.priority_weight == 3 and "priority_weight" in preset:  # 3 is the argparse default
             args.priority_weight = preset["priority_weight"]
+        if not args.flip and preset.get("flip", False):
+            args.flip = True
         if args.output == "pattern_output.png":  # default not overridden by user
             args.output = f"{args.preset}.png"
 
@@ -632,6 +651,8 @@ Examples:
         print(f"  Priority: '{args.priority}' (weight: {args.priority_weight}x)")
     if args.repeats:
         print(f"  Max repeats per image: {args.repeats} (fill ignores this)")
+    if args.flip:
+        print(f"  Flip: random horizontal (50% chance)")
 
     generate_pattern(
         directory=script_dir,
@@ -646,6 +667,7 @@ Examples:
         output_path=os.path.join(script_dir, args.output),
         max_repeats=args.repeats,
         use_fill=args.fill,
+        flip=args.flip,
     )
 
 

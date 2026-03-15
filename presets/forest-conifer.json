@@ -1,0 +1,9 @@
+{
+  "groups": ["conifer","bush", "shroom"],
+  "fill": true,
+  "flip": true,
+  "priority": "conifer",
+  "priority_weight": 10,
+  "density": 10,
+  "spacing": "1-2"
+}

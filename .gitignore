@@ -1,5 +1,4 @@
-pattern_output.png
-*.png
+/*.png
 !wplace-colors-1x.png
 __pycache__/
 *.pyc
