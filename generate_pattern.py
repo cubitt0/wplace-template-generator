@@ -81,7 +81,8 @@ def create_occupancy_mask(width, height):
 def _get_alpha_mask(img, _cache={}):
     """Extract alpha channel as a boolean NumPy array (True where opaque). Cached per image."""
     img_id = id(img)
-    if img_id not in _cache:
+    expected_shape = (img.size[1], img.size[0])  # (height, width)
+    if img_id not in _cache or _cache[img_id].shape != expected_shape:
         alpha = np.array(img.split()[-1])
         _cache[img_id] = alpha > 0
     return _cache[img_id]
